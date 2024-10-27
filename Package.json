@@ -1,0 +1,17 @@
+{
+    "name": "shooting-game-server",
+    "version": "1.0.0",
+    "description": "WebSocket server for shooting game",
+    "main": "app.js",
+    "scripts": {
+      "start": "node app.js",
+      "dev": "nodemon app.js"
+    },
+    "dependencies": {
+      "ws": "^8.16.0",
+      "uuid": "^9.0.1"
+    },
+    "devDependencies": {
+      "nodemon": "^3.0.3"
+    }
+  }
