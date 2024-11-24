@@ -1,148 +1,102 @@
 const WebSocket = require('ws');
-const { v4: uuidv4 } = require('uuid');
-const WalletManager = require('./walletManager');
+const http = require('http');
+const server = http.createServer();
+const wss = new WebSocket.Server({ server });
 
-const wss = new WebSocket.Server({ port: 8182 });
+const clients = new Map();
 const players = new Map();
-const walletManager = new WalletManager();
 
-wss.on('connection', (ws) => {
-    const clientId = uuidv4();
-    players.set(clientId, ws);
+console.log('Starting server...');
+
+wss.on('connection', (ws, req) => {
+    console.log(`New connection from ${req.socket.remoteAddress}`);
+    let playerId = null;
 
     ws.on('message', (message) => {
         try {
-            const parsedMessage = JSON.parse(message);
-            console.log(parsedMessage)
+            const data = JSON.parse(message);
+            playerId = data.playerId;
             
-            if (parsedMessage.messageType === 'wallet') {
-                handleWalletMessage(parsedMessage, clientId, ws);
-            } else {
-                handleGameMessage(parsedMessage, clientId);
+            if (!clients.has(playerId)) {
+                console.log(`Registering new player: ${playerId}`);
+                clients.set(playerId, ws);
+                players.set(playerId, data.data?.player);
             }
-            
+
+            console.log('\nMessage received:', {
+                type: data.type,
+                from: playerId
+            });
+            console.log('Current clients:', Array.from(clients.keys()));
+
+            switch (data.type) {
+                case 'shoot':
+                    console.log(`Broadcasting shot from ${playerId} to other players`);
+                    broadcastToAll(data, playerId);
+                    break;
+                case 'hit':
+                case 'hitConfirmed':
+                case 'kill':
+                    const targetId = data.targetPlayerId;
+                    console.log(`Sending ${data.type} to target: ${targetId}`);
+                    if (targetId && clients.has(targetId)) {
+                        clients.get(targetId).send(JSON.stringify(data));
+                    }
+                    break;
+            }
         } catch (error) {
-            console.error('Error parsing message:', error);
+            console.error('Error processing message:', error);
         }
     });
 
     ws.on('close', () => {
-        handleDisconnect(clientId);
-    });
-
-    ws.on('error', (error) => {
-        console.error('WebSocket error:', error);
-        handleDisconnect(clientId);
+        if (playerId) {
+            console.log(`Player disconnected: ${playerId}`);
+            clients.delete(playerId);
+            players.delete(playerId);
+            
+            broadcastToAll({
+                type: 'leave',
+                playerId: playerId,
+                data: { player: null },
+                timestamp: new Date().toISOString()
+            }, playerId);
+        }
     });
 });
 
-function handleWalletMessage(message, clientId, ws) {
-    console.log('Wallet message received:', message);
+function broadcastToAll(message, senderId) {
+    const messageStr = JSON.stringify(message);
+    console.log('\nBroadcasting message:');
+    console.log('Sender:', senderId);
+    console.log('Message type:', message.type);
+    console.log('All clients:', Array.from(clients.keys()));
     
-    switch (message.type) {
-        case 'wallet_connect':
-            const nonce = walletManager.generateNonce(clientId);
-            ws.send(JSON.stringify({
-                messageType: 'wallet',
-                type: 'wallet_challenge',
-                data: { 
-                    nonce,
-                    message: `Sign this message to authenticate: ${nonce}`
-                },
-                timestamp: new Date().toISOString()
-            }));
-            break;
-            
-        case 'wallet_sign':
-            const { address, signature } = message.data;
-            const isValid = walletManager.verifySignature(address, signature, clientId);
-            
-            if (isValid) {
-                walletManager.associateWalletWithPlayer(clientId, address);
-                
-                ws.send(JSON.stringify({
-                    messageType: 'wallet',
-                    type: 'wallet_authenticated',
-                    data: {
-                        address,
-                        status: 'authenticated'
-                    },
-                    timestamp: new Date().toISOString()
-                }));
-                
-                broadcastMessage({
-                    messageType: 'wallet',
-                    type: 'player_wallet_connected',
-                    data: {
-                        playerId: clientId,
-                        address
-                    },
-                    timestamp: new Date().toISOString()
-                }, clientId);
-            } else {
-                ws.send(JSON.stringify({
-                    messageType: 'wallet',
-                    type: 'wallet_auth_failed',
-                    data: {
-                        reason: 'Invalid signature'
-                    },
-                    timestamp: new Date().toISOString()
-                }));
-            }
-            break;
-            
-        case 'wallet_disconnect':
-            walletManager.removeSession(clientId);
-            ws.send(JSON.stringify({
-                messageType: 'wallet',
-                type: 'wallet_disconnected',
-                data: {
-                    status: 'disconnected'
-                },
-                timestamp: new Date().toISOString()
-            }));
-            break;
-    }
-}
-
-function handleGameMessage(message, clientId) {
-    const walletAddress = walletManager.getPlayerWallet(clientId);
-    if (walletAddress) {
-        message.walletAddress = walletAddress;
-    }
-    
-    if (message.targetPlayerId) {
-        // Direct message to specific player
-        const targetWs = players.get(message.targetPlayerId);
-        if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-            targetWs.send(JSON.stringify(message));
-        }
-    } else {
-        // Broadcast to all other players
-        broadcastMessage(message, clientId);
-    }
-}
-
-function handleDisconnect(clientId) {
-    walletManager.removeSession(clientId);
-    players.delete(clientId);
-    
-    const leaveMessage = {
-        type: 'leave',
-        playerId: clientId,
-        data: {},
-        timestamp: new Date().toISOString()
-    };
-    broadcastMessage(leaveMessage, clientId);
-}
-
-function broadcastMessage(message, senderId) {
-    const messageString = JSON.stringify(message);
-    players.forEach((client, id) => {
-        if (client.readyState === WebSocket.OPEN && id !== senderId) {
-            client.send(messageString);
+    let sentCount = 0;
+    clients.forEach((ws, id) => {
+        if (id !== senderId) {
+            console.log(`Sending to: ${id}`);
+            ws.send(messageStr);
+            sentCount++;
+        } else {
+            console.log(`Skipping sender: ${id}`);
         }
     });
+    console.log(`Message sent to ${sentCount} clients`);
 }
 
-console.log('Game server running on ws://onedayvpn.com:8182');
+const WS_PORT = process.env.WS_PORT || 8182;
+const HEALTH_PORT = process.env.HEALTH_PORT || 8183;
+
+server.listen(WS_PORT, () => {
+    console.log(`WebSocket server running on port ${WS_PORT}`);
+});
+
+http.createServer((req, res) => {
+    res.writeHead(200);
+    res.end('Health check OK');
+}).listen(HEALTH_PORT);
+
+process.on('SIGTERM', () => {
+    server.close(() => process.exit(0));
+});

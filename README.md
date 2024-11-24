@@ -28,12 +28,6 @@ npm install
 npm start
 ```
 
-## Development
-For development with auto-reload:
-```bash
-npm run dev
-```
-
 ## Environment
 The server runs on port 8182 by default. Configure through environment variables if needed.
 
